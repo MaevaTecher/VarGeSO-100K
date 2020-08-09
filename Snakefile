@@ -59,9 +59,9 @@ rule all:
 		#outDir + "/var/ngm/filterbialmaf001_7chrom_sorted.vcf.gz"
 		#expand(outDir + "/ngsadmix/filtered644/{run}/filtered644_{kcluster}.fopt.gz", kcluster = KCLUSTERS, run = RUNS)
 
-########################################
-##### CHECK AND REMOVE HOST GENOME #####
-########################################
+##################################################
+##### CHECK AND REMOVE HONEY BEE HOST GENOME #####
+##################################################
 
 rule checkHost:
 	input:
@@ -97,9 +97,9 @@ rule removeHost:
 		"""
 		
 
-#############################
-##### WHOLE GENOME CALL #####
-#############################
+#####################################
+##### WHOLE GENOME VARIANT CALL #####
+#####################################
 
 ## Here reads will be mapped using either bowtie2 or ngm, then test which one is the best
 ## on whole genome
@@ -159,6 +159,8 @@ rule statsbambowtie2:
                 samtools flagstat {input.alignment} >> {output}
                 """
 
+##### Here we call variant only on the whole genome sequencing data from the 48 individuals
+
 rule freeBayes_WGS:
         input:
                 expand(outDir + "/alignments/bowtie2/{sample}.bam", sample = SAMPLES)
@@ -170,7 +172,6 @@ rule freeBayes_WGS:
                 missing = lambda wildcards, input: len(input) * 0.9
         shell:
                 """
-                #for i in {params.bams}; do name=$(basename $i .bam); if [[ $name == VJ* ]] ; then echo $name VJ; else echo $name VD; fi ; done > {outDir}/var/pops.txt
                 freebayes --min-alternate-fraction 0.2 --use-best-n-alleles 4 -m 5 -q 5 --samples /flash/MikheyevU/Maeva/nugen-results/data/list/WGS_48ind.txt -b {params.bams} {params.span} -f {vdRef} | vcffilter  -f "QUAL > 20" > {output}
                 """
 
@@ -185,89 +186,76 @@ rule mergeVCF_WGS:
                 (grep "^#" {input[0]} ; cat {input} | grep -v "^#" ) | vcfuniq  > {output}
                 """
 
+##### Here we call variant only on the SNP array data from the 48 individuals and on only targeted regions
 
-rule freeBayes_Nugen:
+rule freeBayes_Allegro:
         input:
-                expand(outDir + "/alignments/bowtie2/{sample}.bam", sample = SAMPLES)
+                expand(outDir + "/alignments/ngm/{sample}.bam", sample = SAMPLES)
         output:
-                temp(outDir + "/var/bowtie2/freebayes.target.vcf")
+                temp(outDir + "/var/ngm/freebayes_Allegro_target.vcf")
         params:
                 bams = lambda wildcards, input: os.path.dirname(input[0]) + "/*.bam",
                 missing = lambda wildcards, input: len(input) * 0.9
         shell:
                 """
-                #for i in {params.bams}; do name=$(basename $i .bam); if [[ $name == VJ* ]] ; then echo $name VJ; else echo $name VD; fi ; done > {outDir}/var/pops.txt
+                freebayes --min-alternate-fraction 0.2 --use-best-n-alleles 4 -m 5 -q 5 --samples /flash/MikheyevU/Maeva/nugen-results/data/list/Allegro_48ind.txt --targets /flash/MikheyevU/Maeva/nugen-results/data/list/regions_NUGEN.txt --populations /flash/MikheyevU/Maeva/nugen-results/data/list/pops_host_96ind.txt -b {params.bams} -f {vdRef} | vcffilter  -f "QUAL > 20" > {output}
+                """
+
+rule freeBayes_VarGeSO:
+        input:
+                expand(outDir + "/alignments/ngm/{sample}.bam", sample = SAMPLES)
+        output:
+                temp(outDir + "/var/ngm/freebayes.target.vcf")
+        params:
+                bams = lambda wildcards, input: os.path.dirname(input[0]) + "/*.bam",
+                missing = lambda wildcards, input: len(input) * 0.9
+        shell:
+                """
                 freebayes --min-alternate-fraction 0.2 --use-best-n-alleles 4 -m 5 -q 5 --targets /flash/MikheyevU/Maeva/nugen-results/data/list/regions_NUGEN.txt --populations /flash/MikheyevU/Maeva/nugen-results/data/list/pops_host_96ind.txt -b {params.bams} -f {vdRef} | vcffilter  -f "QUAL > 20" > {output}
                 """
-
-rule filterVCF_1:
+		
+rule chooseMapper:
+# The results are very similar between the two mappers, so we're going with the one that has the greatest number of variants
 	input:
-		rawvcf = outDir + "/var/ngm/raw.vcf"
+		ngm = outDir + "/var/ngm/freebayes.target.vcf", 
+		bowtie2 = outDir + "/var/bowtie2/freebayes.target.vcf", 
 	output:
-		vcf = outDir + "/var/ngm/raw.mac3dp3noindel.vcf",
-		ready2bcf = outDir + "/var/ngm/raw.mac3dp3noindel.vcf.gz",
-		ready2tbi = outDir + "/var/ngm/raw.mac3dp3noindel.vcf.gz.tbi"
+		bgzip = outDir + "/var/freebayes.target.vcf.gz",
+		primitives = outDir + "/var/primitives.vcf.gz"
 	shell:
 		"""
-                vcftools --vcf {input.rawvcf} --remove-indels --minDP 3 --minQ 30 --mac 3 --recode --recode-INFO-all --out /var/ngm/raw.mac3dp3noindel
-		bgzip -c {output.vcf} > {output.ready2bcf}
-		tabix -p vcf {output.ready2bcf}
+		module load samtools/1.3.1 vcflib/1.0.0-rc1
+		ngm=$(grep -vc "^#" {input.ngm})
+		bowtie2=$(grep -vc "^#" {input.bowtie2})
+		echo ngm has $ngm snps vs $bowtie2 for bowtie2 
+		if [[ $ngm -gt $bowtie2 ]]; then
+			echo choosing ngm
+			bgzip -c {input.ngm} > {output.bgzip}
+			vcftools --vcf {input.ngm} --recode --remove-indels --stdout | vcfallelicprimitives | bgzip > {output.primitives}
+		else
+			echo choosing bowtie2
+			bgzip -c {input.bowtie2} > {output.bgzip}
+			vcftools --vcf {input.bowtie2} --recode --remove-indels --stdout | vcfallelicprimitives  | bgzip > {output.primitives}
+		fi
+		tabix -p vcf {output.bgzip} && tabix -p vcf {output.primitives}
 		"""
 
-rule filterVCF_2:
-        input:
-                outDir + "/var/ngm/raw.mac3dp3noindel.vcf.gz"
-        output:
-                vcffilter = outDir + "/var/ngm/filterbialmaf001_7chrom.vcf",
-		ready2bcf = outDir + "/var/ngm/filterbialmaf001_7chrom.vcf.gz",
-                ready2tbi = outDir + "/var/ngm/filterbialmaf001_7chrom.vcf.gz.tbi"
-	shell:
-                """
-                module load vcftools/0.1.16
-                vcftools --gzvcf {input} --max-alleles 2 --maf 0.01 --chr NW_019211454.1 --chr NW_019211455.1 --chr NW_019211456.1 --chr NW_019211457.1 --chr NW_019211458.1 --chr NW_019211459.1 --chr NW_019211460.1 --recode --recode-INFO-all --out filterbialmaf001_7chrom
-                bgzip -c {output.vcffilter} > {output.ready2bcf}
-                tabix -p vcf {output.ready2bcf}
-		"""
-
+# At this point we go with NextGenMap, which produces a bit more variants
+# Followed steps described by https://speciationgenomics.github.io/filtering_vcfs
+# to check the missingness, site quality, etc for R
 
 #########################################
 ##### ANALYSIS POST VARIANT CALLING #####
 #########################################
 
-#### ALL SPECIES COUNFOUNDED
-
-rule sortvcf:
-        input:  variant = outDir + "/var/ngm/filterbialmaf001_7chrom.vcf.gz", list = outDir + "/list/ngslist644.txt"
-        output: outDir + "/var/ngm/filterbialmaf001_7chrom_sorted.vcf.gz"
+rule vcfsort_maf:
+        input:  vcf = outDir + "/var/primitives.vcf.gz",
+                list = outDir + "/list/varroa_ind_2020.txt"
+        output: outDir + "/var/primitives-sortind_maf005.vcf.gz"
         shell:
                 """
-                bcftools view -Oz --samples-file {input.list} {input.variant} > {output}
-                """
-
-rule vcf2GL:
-        input:  outDir + "/var/ngm/filterbialmaf001_7chrom_sorted.vcf.gz"
-        output: temp(outDir + "/ngsadmix/filtered644/{chromosome}.BEAGLE.GL")
-        shell:
-                """
-		module load vcftools/0.1.16
-                vcftools --gzvcf {input} --chr {wildcards.chromosome} --out /work/MikheyevU/Maeva/world-varroa/data/ngsadmix/filtered644/{wildcards.chromosome} --max-missing 1 --BEAGLE-GL
-                """
-
-rule mergeGL:
-        input: expand(outDir + "/ngsadmix/filtered644/{chromosome}.BEAGLE.GL", chromosome = CHROMOSOMES)
-        output: outDir + "/ngsadmix/filtered644/sevenchr.BEAGLE.GL"
-        shell:
-                """
-                (head -1 {input[0]}; for i in {input}; do cat $i | sed 1d; done) > {output}
-                """
-
-rule NGSadmix:
-        input: outDir + "/ngsadmix/filtered644/sevenchr.BEAGLE.GL"
-        threads: 12
-        output: temp(outDir + "/ngsadmix/filtered644/{run}/raw366_{kcluster}.fopt.gz")
-        shell:
-                """
-                NGSadmix -P {threads} -likes {input} -K {wildcards.kcluster} -outfiles /work/MikheyevU/Maeva/world-varroa/data/ngsadmix/filtered644/{wildcards.run}/filtered644_{wildcards.kcluster} -minMaf 0.1
+                bcftools view --samples-file {input.list} --output-file {output} -Oz --min-af 0.05 {input.vcf}
+                tabix -p vcf {output}
                 """
 
 #############################
@@ -287,39 +275,4 @@ rule mtDNA_ngm:
                 ngm -t {threads} -b  -1 {input.read1} -2 {input.read2} -r {vdmtDNA} --rg-id {wildcards.sample} --rg-sm {wildcards.sample} --rg-pl ILLUMINA --rg-lb {wildcards.sample} | samtools view -Su -F4 -q10 | samtools sort - -m 55G -T {SCRATCH}/ngm_mtDNA/{wildcards.sample} -o - | samtools rmdup - - | variant - -m 1000 -b -o {output.alignment}
                 samtools index {output.alignment}
                 """
-
-rule mtDNA_freeBayes:
-        input:
-                expand(outDir + "/alignments/ngm_mtDNA/{sample}.bam", sample = SAMPLES)
-        output:
-                temp(outDir + "/var/ngm_mtDNA/split_mtDNA/freebayes_mtDNA.{regionmt}.vcf")
-        params:
-                span = lambda wildcards: REGIONSMT[wildcards.regionmt],
-                bams = lambda wildcards, input: os.path.dirname(input[0]) + "/*.bam",
-        shell:
-                """
-		module load freebayes/1.3.1 vcftools/0.1.16 vcflib/1.0.0-rc1
-                freebayes --ploidy 2 --min-alternate-fraction 0.2 --use-best-n-alleles 4 -m 5 -q 5 --populations {outDir}/list/pops_sphost_world644.txt -b {params.bams} {params.span} -f {vdmtDNA} | vcffilter -f "QUAL > 20" > {output}
-                """
-
-rule mtDNA_mergeVCF:
-        input:
-                expand(outDir + "/var/ngm_mtDNA/split_mtDNA/freebayes_mtDNA.{regionmt}.vcf", regionmt = REGIONSMT)
-        output:
-                mergevcf = outDir + "/var/ngm_mtDNA/raw_mtDNA.vcf",
-		bcfready = outDir + "/var/ngm_mtDNA/raw_mtDNA.vcf.gz"
-        shell:
-                """
-                (grep "^#" {input[0]} ; cat {input} | grep -v "^#" ) | vcfuniq  > {output.mergevcf}
-		bgzip -c {output.mergevcf} > {output.bcfready}
-		tabix -p vcf {output.bcfready}
-                """
-
-
-rule mtDNA_consensus:
-	input:	outDir + "/var/ngm_mtDNA/raw_mtDNA.vcf.gz"
-	output:	temp(outDir + "/var/ngm_mtDNA/consensus/{sample}.fasta")
-	shell:
-		"""
-		bcftools consensus --iupac-codes --sample {wildcards.sample} --fasta-ref {vdmtDNA} --output {output} {input}
-		"""
+		
